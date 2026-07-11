@@ -1,0 +1,214 @@
+{
+  "app-id": "io.github.zaps166.QMPlay2",
+  "runtime": "org.kde.Platform",
+  "runtime-version": "6.10",
+  "sdk": "org.kde.Sdk",
+  "command": "QMPlay2",
+  "rename-icon": "QMPlay2",
+  "rename-desktop-file": "QMPlay2.desktop",
+  "rename-appdata-file": "QMPlay2.appdata.xml",
+  "finish-args": [
+    "--device=all",
+    "--share=ipc",
+    "--share=network",
+    "--socket=pulseaudio",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--filesystem=home",
+    "--filesystem=xdg-music:ro",
+    "--filesystem=xdg-videos:ro",
+    "--filesystem=xdg-run/pipewire-0:ro",
+    "--filesystem=/media",
+    "--filesystem=/mnt",
+    "--filesystem=/run/media",
+    "--system-talk-name=org.freedesktop.UDisks2",
+    "--system-talk-name=org.freedesktop.login1",
+    "--system-talk-name=org.freedesktop.ConsoleKit",
+    "--talk-name=org.freedesktop.ScreenSaver",
+    "--talk-name=org.freedesktop.Notifications",
+    "--own-name=org.mpris.MediaPlayer2.QMPlay2",
+    "--own-name=org.mpris.MediaPlayer2.QMPlay2.*"
+  ],
+  "cleanup": [
+    "/bin/cd*",
+    "/bin/rubberband*",
+    "/bin/mmc*",
+    "/bin/iso*",
+    "/include",
+    "/lib/pkgconfig",
+    "/lib/ladspa",
+    "/lib/libcdio++*",
+    "/lib/libiso9660*",
+    "/lib/libudf*",
+    "/lib/libstilview*",
+    "/man",
+    "/share/info",
+    "/share/ladspa",
+    "/share/doc",
+    "/share/gtk-doc",
+    "/share/man",
+    "/share/pkgconfig",
+    "*.la",
+    "*.a"
+  ],
+  "cleanup-commands": [
+      "mkdir -p /app/lib/ffmpeg"
+  ],
+  "modules": [
+   {
+      "name": "libass",
+      "buildsystem": "autotools",
+      "config-opts": [
+        "--enable-harfbuzz",
+        "--enable-fontconfig"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/libass/libass.git",
+          "tag": "0.17.5",
+          "commit": "4a05d8127f525943ebf45fdc6497c9e665947f0d"
+        }
+      ]
+    },
+    {
+      "name": "gme",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DCMAKE_INSTALL_LIBDIR=lib"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/libgme/game-music-emu.git",
+          "tag": "0.6.5",
+          "commit": "9e23d10f9fd2a6a2f33b10912dd8dc7153258995"
+        }
+      ]
+    },
+    {
+      "name": "cddb",
+      "buildsystem": "autotools",
+      "build-options": {
+        "cflags": "-Wno-incompatible-pointer-types"
+      },
+      "config-opts": [
+        "--disable-static"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://downloads.sourceforge.net/sourceforge/libcddb/libcddb-1.3.2.tar.bz2",
+          "sha256": "35ce0ee1741ea38def304ddfe84a958901413aa829698357f0bee5bb8f0a223b"
+        },
+        {
+          "type": "script",
+          "commands": [
+            "autoreconf -fiv"
+          ],
+          "dest-filename": "autogen.sh"
+        },
+        {
+          "type": "shell",
+          "commands": [
+            "cp /usr/share/autoconf/build-aux/config.sub .",
+            "cp /usr/share/autoconf/build-aux/config.guess ."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cdio",
+      "buildsystem": "autotools",
+      "config-opts": [
+        "--disable-static",
+        "--enable-maintainer-mode"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://git.savannah.gnu.org/git/libcdio.git",
+          "tag": "release-2.1.0",
+          "commit": "9c7a2779846da161279bc1501e83c849cf89a594"
+        },
+        {
+          "type": "script",
+          "commands": [
+            "autoreconf -fiv"
+          ],
+          "dest-filename": "autogen.sh"
+        }
+      ]
+    },
+    {
+      "name": "libsidplayfp",
+      "buildsystem": "autotools",
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/libsidplayfp/libsidplayfp/releases/download/v3.0.1/libsidplayfp-3.0.1.tar.gz",
+          "sha256": "6b8ffedc2f631a4ca53258e60468eab3e6a2dc4e1369b2e59e3a5955f99a2143"
+        }
+      ]
+    },
+    {
+      "name": "rubberband",
+      "buildsystem": "meson",
+      "config-opts": [
+        "--libdir=lib"
+      ],
+      "sources": [
+        {
+          "type": "git",
+          "url": "https://github.com/breakfastquay/rubberband.git",
+          "tag": "v4.0.0",
+          "commit": "1d95888bec3ae0a17c0c4af791810d5a63f6bc35"
+        }
+      ]
+    },
+    {
+      "name": "libopenmpt",
+      "buildsystem": "autotools",
+      "config-opts": [
+        "--without-mpg123",
+        "--without-ogg",
+        "--without-vorbis",
+        "--without-vorbisfile",
+        "--without-portaudio",
+        "--without-portaudiocpp",
+        "--without-sndfile",
+        "--without-flac",
+        "--disable-tests",
+        "--disable-examples",
+        "--disable-openmpt123",
+        "--disable-doxygen-html"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://lib.openmpt.org/files/libopenmpt/src/libopenmpt-0.8.7+release.autotools.tar.gz",
+          "sha256": "275c29ef47be9992f62a35fcc96f7ca05c06d2fd05c9298b8dee9f743f75b089"
+        }
+      ]
+    },
+    {
+      "name": "qmplay2",
+      "buildsystem": "cmake-ninja",
+      "post-install": [
+        "mv /app/share/applications/QMPlay2_enqueue.desktop /app/share/applications/io.github.zaps166.QMPlay2.enqueue.desktop",
+        "sed -i 's,^Icon=QMPlay2$,Icon=io.github.zaps166.QMPlay2,g' /app/share/applications/io.github.zaps166.QMPlay2.enqueue.desktop"
+      ],
+      "config-opts": [
+        "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON",
+        "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DUSE_CUVID=OFF"
+      ],
+      "sources": [
+        {
+          "type": "dir",
+          "path": "."
+        }
+      ]
+    }
+  ]
+}

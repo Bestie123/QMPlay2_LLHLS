@@ -1,0 +1,399 @@
+﻿diff --git a/src/gui/CMakeLists.txt b/src/gui/CMakeLists.txt
+index 39da228..70a0e7e 100644
+--- a/src/gui/CMakeLists.txt
++++ b/src/gui/CMakeLists.txt
+@@ -237,6 +237,10 @@ endif()
+ 
+ if(WIN32)
+     install(TARGETS ${PROJECT_NAME} RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/)
++    # qt.conf тАФ tells Qt where to find plugins and translations
++    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/qt.conf
++        "[Platforms]\nWindowsArguments = fontengine=freetype\n\n[Paths]\nTranslations = translations\n")
++    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/qt.conf DESTINATION ${CMAKE_INSTALL_PREFIX}/)
+ elseif(APPLE)
+     install(TARGETS ${PROJECT_NAME} BUNDLE DESTINATION ${CMAKE_INSTALL_PREFIX})
+ 
+diff --git a/src/gui/DemuxerThr.cpp b/src/gui/DemuxerThr.cpp
+index 2c9b240..49476ec 100644
+--- a/src/gui/DemuxerThr.cpp
++++ b/src/gui/DemuxerThr.cpp
+@@ -1,4 +1,4 @@
+-/*
++я╗┐/*
+     QMPlay2 is a video and audio player.
+     Copyright (C) 2010-2026  B┼Вa┼╝ej Szczygie┼В
+ 
+@@ -33,6 +33,8 @@
+ #include <QCryptographicHash>
+ #include <QCoreApplication>
+ #include <QDir>
++#include <QFile>
++#include <QDateTime>
+ 
+ #include <cmath>
+ 
+@@ -786,6 +788,9 @@ void DemuxerThr::startRecordingInternal(QHash<int, int> &recStreamsMap)
+     const auto dir = QMPlay2Core.getSettings().getString("OutputFilePath");
+     const auto fileName = Functions::getSeqFile(dir, "." + ext, "rec");
+     m_recMuxer = std::make_unique<StreamMuxer>(dir + "/" + fileName, recStreamsInfo, fmt, true);
++    { QFile dbgLog(QDir::tempPath() + "/QMPlay2_rec.log");
++      if (dbgLog.open(QIODevice::Append | QIODevice::Text))
++          dbgLog.write((QDateTime::currentDateTime().toString("hh:mm:ss") + QString(" streams=%1 vid=%2 aud=%3 ok=%4").arg(recStreamsInfo.size()).arg(playC.videoStream).arg(playC.audioStream).arg(m_recMuxer->isOk() ? "Y" : "N") + "\n").toUtf8()); }
+     if (m_recMuxer->isOk())
+     {
+         emit recording(true, false, fileName);
+diff --git a/src/modules/Extensions/Downloader.cpp b/src/modules/Extensions/Downloader.cpp
+index e6d8c2b..533a78f 100644
+--- a/src/modules/Extensions/Downloader.cpp
++++ b/src/modules/Extensions/Downloader.cpp
+@@ -1,4 +1,4 @@
+-/*
++я╗┐/*
+     QMPlay2 is a video and audio player.
+     Copyright (C) 2010-2026  B┼Вa┼╝ej Szczygie┼В
+ 
+@@ -26,6 +26,7 @@
+ 
+ #include <QSet>
+ #include <QDir>
++#include <QThread>
+ #include <QHash>
+ #include <QMenu>
+ #include <QTimer>
+@@ -576,6 +577,9 @@ void DownloaderThread::finished()
+ void DownloaderThread::run()
+ {
+     ioCtrl.resetAbort();
++    QFile dbg(QDir::tempPath() + "/QMPlay2_dl.log");
++    if (dbg.open(QIODevice::Append | QIODevice::Text))
++        dbg.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": START url=" + url + "\n").toUtf8());
+ 
+     QString scheme = Functions::getUrlScheme(url);
+     if (scheme.isEmpty())
+@@ -628,17 +632,53 @@ void DownloaderThread::run()
+     bool err = true;
+ 
+     const bool isFFmpeg = newUrl.startsWith("FFmpeg://");
++    QFile dbg2(QDir::tempPath() + "/QMPlay2_dl.log");
++    if (dbg2.open(QIODevice::Append | QIODevice::Text))
++        dbg2.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": isLive check: newUrl=" + newUrl + " prefix=" + prefix + "\n").toUtf8());
+     const bool isLive = !isFFmpeg && (newUrl.endsWith(".m3u8", Qt::CaseInsensitive)
+                                    || newUrl.endsWith(".mpd", Qt::CaseInsensitive)
+                                    || newUrl.contains(".m3u8?", Qt::CaseInsensitive));
++    { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++      if (log.open(QIODevice::Append | QIODevice::Text))
++          log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": isLive=" + QString(isLive ? "Y" : "N") + " isFFmpeg=" + QString(isFFmpeg ? "Y" : "N") + " prefix=" + prefix + " newUrl=" + newUrl.left(80) + "\n").toUtf8()); }
+     if (isFFmpeg || isLive || !prefix.isEmpty())
+     {
+         IOController<Demuxer> &demuxer = ioCtrl.toRef<Demuxer>();
+         QMPlay2Core.setWorking(true);
+-        if (Demuxer::create(newUrl, demuxer) && !demuxer.isAborted())
++        { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++          if (log.open(QIODevice::Append | QIODevice::Text))
++              log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": ENTERED_LIVE_BLOCK\n").toUtf8()); }
++        // Retry live stream open: edges often block the first connection.
++        // ╨Ы╨╛╨│╨╕╤А╤Г╨╡╨╝ created/aborted ╨┐╨╛ ╨║╨░╨╢╨┤╨╛╨╣ ╨┐╨╛╨┐╤Л╤В╨║╨╡ тАФ ╤Н╤В╨╛ ╨┐╨╛╨║╨░╨╖╤Л╨▓╨░╨╡╤В:
++        //   created=Y              => ╨╛╤В╨║╤А╤Л╨╗╨╛╤Б╤М, ╨╕╨┤╤С╨╝ ╨┤╨░╨╗╤М╤И╨╡
++        //   created=N, aborted=N   => edge ╤А╨╡╨░╨╗╤М╨╜╨╛ ╨╛╤В╨║╨╗╨╛╨╜╨╕╨╗ (╤Б╨╡╤В╤М/403/timeout)
++        //   created=N, aborted=Y   => ioCtrl ╨╛╤В╤А╨░╨▓╨╗╨╡╨╜ ╨▓╨╜╤Г╤В╤А╨╡╨╜╨╜╨╕╨╝ abort demuxer'╨░
++        bool created = false;
++        for (int dlAttempt = 0; dlAttempt < 5; ++dlAttempt)
++        {
++            demuxer.resetAbort();
++            created = Demuxer::create(newUrl, demuxer);
++            const bool aborted = demuxer.isAborted();
++            { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++              if (log.open(QIODevice::Append | QIODevice::Text))
++                  log.write(QString("[%1] attempt %2/5: created=%3 aborted=%4\n")
++                            .arg(QDateTime::currentDateTime().toString("hh:mm:ss"))
++                            .arg(dlAttempt + 1)
++                            .arg(created ? "Y" : "N")
++                            .arg(aborted ? "Y" : "N").toUtf8()); }
++            if (created)
++                break;
++            demuxer.reset();
++            if (dlAttempt + 1 < 5)
++                QThread::msleep(2000);
++        }
++        if (created)
+         {
+             QList<StreamInfo *> streamsInfo = demuxer->streamsInfo();
+             QHash<int, int> selectedStreamsMap;
++            { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++              if (log.open(QIODevice::Append | QIODevice::Text))
++                  log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": CREATED_OK streams=" + QString::number(streamsInfo.size()) + "\n").toUtf8()); }
+ 
+             // Download only first default video stream
+             {
+@@ -684,6 +724,9 @@ void DownloaderThread::run()
+                     ++i;
+                 }
+                 demuxer->selectStreams(selectedStreams);
++            { QFile dbg(QDir::tempPath() + "/QMPlay2_dl.log");
++              if (dbg.open(QIODevice::Append | QIODevice::Text))
++                  dbg.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": STREAMS=" + QString::number(streamsInfo.size()) + "" + "\n").toUtf8()); }
+             }
+ 
+             const auto [ext, fmt] = Functions::determineExtFmt(streamsInfo);
+@@ -705,6 +748,9 @@ void DownloaderThread::run()
+             if (!filePath.isEmpty())
+             {
+                 StreamMuxer muxer(filePath, streamsInfo, fmt);
++                { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++                  if (log.open(QIODevice::Append | QIODevice::Text))
++                      log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": MUXER ok=" + QString(muxer.isOk() ? "Y" : "N") + " file=" + filePath + "\n").toUtf8()); }
+                 if (muxer.isOk())
+                 {
+                     const double length = demuxer->length();
+@@ -716,20 +762,31 @@ void DownloaderThread::run()
+                     emit listSig(SET, (size < 0 || isLive) ? (length < 0 ? -1 : -2) : size, filePath);
+                     err = false;
+                     speedT.start();
++                    { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++                      if (log.open(QIODevice::Append | QIODevice::Text))
++                          log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": READ_LOOP_START\n").toUtf8()); }
+                     while (!demuxer.isAborted())
+                     {
+                         Packet packet;
+                         int idx = -1;
+                         if (!demuxer->read(packet, idx))
++                        {
++                            { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++                              if (log.open(QIODevice::Append | QIODevice::Text))
++                                  log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": READ_FAIL aborted=" + QString(demuxer.isAborted() ? "Y" : "N") + "\n").toUtf8()); }
+                             break;
++                        }
+                         idx = selectedStreamsMap.value(idx, -1);
+                         if (idx < 0 || idx >= streamsInfo.count())
+                             continue;
+ 
+                         if (!muxer.write(packet, idx))
+                         {
+-                            err = true;
+-                            break;
++                            { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++                              if (log.open(QIODevice::Append | QIODevice::Text))
++                                  log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": WRITE_SKIP idx=" + QString::number(idx) + " pktSize=" + QString::number(packet.size()) + " pktTs=" + QString::number(packet.ts()) + "\n").toUtf8()); }
++                            // Don't break тАФ skip bad packets, continue recording
++                            // LL-HLS first packets often have no DTS/PTS, muxer rejects them
+                         }
+ 
+                         bytePos += packet.size();
+@@ -749,6 +806,9 @@ void DownloaderThread::run()
+             }
+             demuxer.reset();
+         }
++        { QFile log(QDir::tempPath() + "/QMPlay2_dl.log");
++          if (log.open(QIODevice::Append | QIODevice::Text))
++              log.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": EMIT err=" + QString(err ? "Y" : "N") + " created=" + QString(created ? "Y" : "N") + "\n").toUtf8()); }
+         emit listSig(err ? DOWNLOAD_ERROR : FINISH);
+         QMPlay2Core.setWorking(false);
+         return;
+diff --git a/src/modules/FFmpeg/FFDemux.cpp b/src/modules/FFmpeg/FFDemux.cpp
+index f250a15..e27a02c 100644
+--- a/src/modules/FFmpeg/FFDemux.cpp
++++ b/src/modules/FFmpeg/FFDemux.cpp
+@@ -1,4 +1,4 @@
+-/*
++я╗┐/*
+     QMPlay2 is a video and audio player.
+     Copyright (C) 2010-2026  B┼Вa┼╝ej Szczygie┼В
+ 
+@@ -25,6 +25,7 @@
+ #include <Packet.hpp>
+ 
+ #include <QFile>
++#include <QThread>
+ 
+ FFDemux::FFDemux(Module &module) :
+     abortFetchTracks(false),
+@@ -525,23 +526,28 @@ Playlist::Entries FFDemux::fetchTracks(const QString &url, bool &ok)
+ 
+ void FFDemux::addFormatContext(QString url, const QString &param)
+ {
+-    FormatContext *fmtCtx = new FormatContext(m_reconnectNetwork, m_allowExperimental);
+-    {
+-        QMutexLocker mL(&mutex);
+-        formatContexts.append(fmtCtx);
+-    }
+-    if (!url.contains("://"))
+-        url.prepend("file://");
+-    if (fmtCtx->open(url, param))
+-    {
+-        streams_info.append(fmtCtx->streamsInfo);
+-    }
+-    else
++    const int maxTries = 4;
++    QString effectiveUrl = url;
++    if (!effectiveUrl.contains("://"))
++        effectiveUrl.prepend("file://");
++    for (int attempt = 0; attempt < maxTries; ++attempt)
+     {
++        FormatContext *fmtCtx = new FormatContext(m_reconnectNetwork, m_allowExperimental);
++        {
++            QMutexLocker mL(&mutex);
++            formatContexts.append(fmtCtx);
++        }
++        if (fmtCtx->open(effectiveUrl, param))
++        {
++            streams_info.append(fmtCtx->streamsInfo);
++            return;
++        }
+         {
+             QMutexLocker mL(&mutex);
+             formatContexts.erase(formatContexts.end() - 1);
+         }
+         delete fmtCtx;
++        if (attempt + 1 < maxTries)
++            QThread::msleep(1500);
+     }
+ }
+diff --git a/src/modules/FFmpeg/FormatContext.cpp b/src/modules/FFmpeg/FormatContext.cpp
+index 1809fd2..52eb163 100644
+--- a/src/modules/FFmpeg/FormatContext.cpp
++++ b/src/modules/FFmpeg/FormatContext.cpp
+@@ -1,4 +1,4 @@
+-/*
++я╗┐/*
+     QMPlay2 is a video and audio player.
+     Copyright (C) 2010-2026  B┼Вa┼╝ej Szczygie┼В
+ 
+@@ -24,6 +24,9 @@
+ #include <OggHelper.hpp>
+ #include <Settings.hpp>
+ #include <Packet.hpp>
++#include <QFile>
++#include <QDir>
++#include <QDateTime>
+ 
+ #ifdef Q_OS_ANDROID
+ #   include <QFile>
+@@ -228,7 +231,10 @@ public:
+ private:
+     void run() override
+     {
+-        avformat_open_input(&m_formatCtx, m_url, m_inputFmt, &m_options);
++        const int ret = avformat_open_input(&m_formatCtx, m_url, m_inputFmt, &m_options);
++        QFile ff(QDir::tempPath() + "/QMPlay2_ffmpeg.log");
++        if (ff.open(QIODevice::Append | QIODevice::Text))
++            ff.write((QDateTime::currentDateTime().toString("hh:mm:ss") + " ret=" + QByteArray::number(ret) + " url=" + m_url + "\n").toUtf8());
+         if (!wakeIfNotAborted() && m_formatCtx)
+             avformat_close_input(&m_formatCtx);
+     }
+@@ -771,11 +777,13 @@ bool FormatContext::open(const QString &_url, const QString &param)
+             av_dict_set(&options, "reconnect", "1", 0);
+             av_dict_set(&options, "reconnect_streamed", "1", 0);
+             av_dict_set(&options, "reconnect_on_network_error", "1", 0);
+-            av_dict_set(&options, "reconnect_delay_max", "7", 0);
++            av_dict_set(&options, "reconnect_delay_max", "30", 0);
+         }
+         if (!isLocal)
+         {
+             av_dict_set(&options, "extension_picky", "0", 0);
++            av_dict_set(&options, "multiple_requests", "1", 0);
++            av_dict_set(&options, "timeout", "30000000", 0);
+         }
+     }
+ 
+@@ -815,7 +823,15 @@ bool FormatContext::open(const QString &_url, const QString &param)
+     formatCtx = openThr->getFormatCtx();
+     openThr->drop();
+     if (!formatCtx || disabledDemuxers.contains(name()))
++    {
++        if (!formatCtx)
++        {
++            QFile dbgLog(QDir::tempPath() + "/QMPlay2_open.log");
++            if (dbgLog.open(QIODevice::Append | QIODevice::Text))
++                dbgLog.write((QDateTime::currentDateTime().toString("hh:mm:ss") + ": OPEN FAILED url=" + url + "\n").toUtf8());
++        }
+         return false;
++    }
+ 
+     auto isAvif = [&] {
+         if (formatCtx->nb_streams != 1 || !name().contains("mp4"))
+diff --git a/src/qmplay2/Functions.cpp b/src/qmplay2/Functions.cpp
+index 8a82c3c..fe1e1e7 100644
+--- a/src/qmplay2/Functions.cpp
++++ b/src/qmplay2/Functions.cpp
+@@ -1,4 +1,4 @@
+-/*
++я╗┐/*
+     QMPlay2 is a video and audio player.
+     Copyright (C) 2010-2026  B┼Вa┼╝ej Szczygie┼В
+ 
+@@ -34,6 +34,7 @@
+ #include <QPainter>
+ #include <QDir>
+ #include <QUrl>
++#include <QUrlQuery>
+ #include <QWindow>
+ #include <QLibrary>
+ #include <QTextCodec>
+@@ -877,6 +878,17 @@ QString Functions::prepareFFmpegUrl(QString url, AVDictionary *&options, bool de
+ 
+         if (url.startsWith("mms:"))
+             url.insert(3, 'h');
++        // Some LL-HLS/CDN edge servers block playback unless a Referer/Origin header
++        // matching the stream origin is present. When none is set, derive it from the URL.
++        if (!rawHeaders.toLower().contains("referer:") && url.contains("://"))
++        {
++            const QUrl u(url);
++            if (u.scheme().startsWith("http"))
++            {
++                const QString origin = u.scheme() + "://" + u.host();
++                rawHeaders += ("Referer: " + origin + "/\r\nOrigin: " + origin + "/\r\n").toUtf8();
++            }
++        }
+ 
+         if (url.startsWith("http"))
+             av_dict_set(&options, "icy", icy ? "1" : "0", 0);
+@@ -886,6 +898,7 @@ QString Functions::prepareFFmpegUrl(QString url, AVDictionary *&options, bool de
+             av_dict_set(&options, "headers", rawHeaders.constData(), 0);
+ 
+         av_dict_set(&options, "reconnect", "1", 0);
++        av_dict_set(&options, "multiple_requests", "1", 0);
+     }
+     return url;
+ }
+diff --git a/src/qmplay2/StreamMuxer.cpp b/src/qmplay2/StreamMuxer.cpp
+index 1660072..cebb581 100644
+--- a/src/qmplay2/StreamMuxer.cpp
++++ b/src/qmplay2/StreamMuxer.cpp
+@@ -22,6 +22,9 @@
+ #include <Packet.hpp>
+ 
+ #include <QLoggingCategory>
++#include <QFile>
++#include <QDateTime>
++#include <QDir>
+ 
+ #include <unordered_map>
+ 
+@@ -187,8 +190,11 @@ bool StreamMuxer::write(const Packet &packet, const int idx)
+     }
+ 
+     p.pkt->duration = round(packet.duration() / timeBase);
+-    if (packet.hasDts())
+-        p.pkt->dts = round((packet.dts() - p.firstDts) / timeBase);
++    // LL-HLS often provides PTS without DTS тАФ use PTS as DTS fallback
++    // to avoid AV_NOPTS_VALUE which causes av_interleaved_write_frame to fail
++    const auto dtsSrc = packet.hasDts() ? packet.dts() : (packet.hasPts() ? packet.pts() : 0.0);
++    if (packet.hasDts() || packet.hasPts())
++        p.pkt->dts = round((dtsSrc - p.firstDts) / timeBase);
+     if (packet.hasPts())
+         p.pkt->pts = round((packet.pts() - p.firstDts) / timeBase);
+     p.pkt->flags = packet.hasKeyFrame() ? AV_PKT_FLAG_KEY : 0;
+@@ -218,5 +224,13 @@ bool StreamMuxer::write(const Packet &packet, const int idx)
+     }
+ 
+     const int err = av_interleaved_write_frame(p.ctx, p.pkt);
++    if (err < 0)
++    {
++        char errBuf[256];
++        av_strerror(err, errBuf, sizeof(errBuf));
++        qCWarning(mux) << "av_interleaved_write_frame FAILED:" << errBuf << "stream" << idx << "dts" << p.pkt->dts << "size" << p.pkt->size;
++        FILE *f = fopen("C:/Users/misch/AppData/Local/Temp/QMPlay2_muxerr.log", "a");
++        if (f) { fprintf(f, "AV_WRITE_ERR code=%d msg=%s dts=%lld size=%d stream=%d\n", err, errBuf, (long long)p.pkt->dts, p.pkt->size, idx); fclose(f); }
++    }
+     return (err == 0);
+ }
