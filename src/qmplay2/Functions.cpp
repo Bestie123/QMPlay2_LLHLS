@@ -886,7 +886,7 @@ QString Functions::prepareFFmpegUrl(QString url, AVDictionary *&options, bool de
             if (u.scheme().startsWith("http"))
             {
                 const QString origin = u.scheme() + "://" + u.host();
-                rawHeaders += QByteArray("Referer: " + origin + "/\r\nOrigin: " + origin + "\r\n");
+                rawHeaders += ("Referer: " + origin + "/\r\nOrigin: " + origin + "/\r\n").toUtf8();
             }
         }
 

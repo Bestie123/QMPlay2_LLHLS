@@ -312,7 +312,7 @@ index 1809fd2..52eb163 100644
      auto isAvif = [&] {
          if (formatCtx->nb_streams != 1 || !name().contains("mp4"))
 diff --git a/src/qmplay2/Functions.cpp b/src/qmplay2/Functions.cpp
-index 8a82c3c..47a3a9c 100644
+index 8a82c3c..fe1e1e7 100644
 --- a/src/qmplay2/Functions.cpp
 +++ b/src/qmplay2/Functions.cpp
 @@ -1,4 +1,4 @@
@@ -341,7 +341,7 @@ index 8a82c3c..47a3a9c 100644
 +            if (u.scheme().startsWith("http"))
 +            {
 +                const QString origin = u.scheme() + "://" + u.host();
-+                rawHeaders += QByteArray("Referer: " + origin + "/\r\nOrigin: " + origin + "\r\n");
++                rawHeaders += ("Referer: " + origin + "/\r\nOrigin: " + origin + "/\r\n").toUtf8();
 +            }
 +        }
  
