@@ -1,0 +1,56 @@
+# C++ objects and libs
+
+*.a
+*.la
+*.lai
+*.dll
+*.obj
+*_wrapper.bat
+
+# Visual Studio generated files
+
+*.ib_pdb_index
+*.idb
+*.ilk
+*.pdb
+*.sln
+*.suo
+*.vcproj
+*vcproj.*.*.user
+*.ncb
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.exe.embed.manifest
+*.exe_manifest.rc
+*.exe_manifest.res
+*_resource.rc
+
+# MinGW generated files
+
+*.Debug
+*.Release
+
+# Qt-es
+
+*.pro.user
+*.pro.user.*
+*.qmlproject.user
+*.qmlproject.user.*
+moc_*.cpp
+qrc_*.cpp
+Makefile*
+*-build-*
+.qmake.cache
+ui_*.h
+.moc
+
+# Directories
+
+debug
+release
+tmp
+
+# Test generated files
+/tests/auto/cmake/build
+/tests/auto/headersclean/tst_headersclean.cpp

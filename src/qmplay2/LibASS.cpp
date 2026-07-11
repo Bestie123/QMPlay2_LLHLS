@@ -1,0 +1,669 @@
+/*
+    QMPlay2 is a video and audio player.
+    Copyright (C) 2010-2026  Błażej Szczygieł
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Lesser General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Lesser General Public License for more details.
+
+    You should have received a copy of the GNU Lesser General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include <LibASS.hpp>
+
+#ifdef QMPLAY2_LIBASS
+
+#include <QMPlay2OSD.hpp>
+#include <Functions.hpp>
+#include <Settings.hpp>
+
+#include <QColor>
+
+extern "C" {
+#include <ass/ass.h>
+}
+
+#include <cstring>
+#include <cmath>
+
+using namespace std;
+
+#ifdef USE_VULKAN
+#   include "../qmvk/PhysicalDevice.hpp"
+#   include "../qmvk/Device.hpp"
+#   include "../qmvk/Buffer.hpp"
+#   include "../qmvk/BufferView.hpp"
+
+#   include <vulkan/VulkanInstance.hpp>
+#   include <vulkan/VulkanBufferPool.hpp>
+#endif
+
+static inline quint32 assColorFromQColor(const QColor &color, bool invert = false)
+{
+    if (!invert)
+        return color.red() << 24 | color.green() << 16 | color.blue() << 8 | (~color.alpha() & 0xFF);
+    return (~color.red() & 0xFF) << 24 | (~color.green() & 0xFF) << 16 | (~color.blue() & 0xFF) << 8 | (~color.alpha() & 0xFF);
+}
+static inline int toASSAlignment(int align)
+{
+    switch (align)
+    {
+        case 0:
+            return 5;
+        case 1:
+            return 6;
+        case 2:
+            return 7;
+        case 3:
+            return 9;
+        case 4:
+            return 10;
+        case 5:
+            return 11;
+        case 6:
+            return 1;
+        case 7:
+            return 2;
+        case 8:
+            return 3;
+        default:
+            return 0;
+    }
+}
+
+/**/
+
+bool LibASS::isDummy()
+{
+    return false;
+}
+
+LibASS::LibASS(Settings &settings) :
+    settings(settings)
+{
+    m_subsAss = ass_library_init();
+    m_osdAss = ass_library_init();
+
+    winW = winH = W = H = 0;
+    zoom = 0.0;
+    aspect_ratio = -1.0;
+    fontScale = 1.0;
+
+    osd_track = ass_sub_track = nullptr;
+    osd_style = nullptr;
+    osd_event = nullptr;
+    osd_renderer = ass_sub_renderer = nullptr;
+
+#ifdef USE_VULKAN
+    if (QMPlay2Core.isVulkanRenderer())
+        m_vkBufferPool = std::static_pointer_cast<QmVk::Instance>(QMPlay2Core.gpuInstance())->createBufferPool();
+#endif
+}
+LibASS::~LibASS()
+{
+    closeASS();
+    closeOSD();
+    ass_library_done(m_osdAss);
+    ass_library_done(m_subsAss);
+}
+
+bool LibASS::addImgs(ass_image *img, QMPlay2OSD *osd)
+{
+#ifdef USE_VULKAN
+    if (m_vkBufferPool)
+    {
+        using namespace QmVk;
+
+        auto device = m_vkBufferPool->instance()->device();
+        if (!device)
+            return false;
+
+        const auto alignment = device->physicalDevice()->limits().minTexelBufferOffsetAlignment;
+
+        auto getImgBuffSize = [&](ASS_Image *img) {
+            return FFALIGN(img->stride * img->h, alignment);
+        };
+
+        auto imgBegin = img;
+
+        vk::DeviceSize buffSize = 0;
+        vk::DeviceSize buffOffset = 0;
+
+        img = imgBegin;
+        while (img)
+        {
+            buffSize += getImgBuffSize(img);
+            img = img->next;
+        }
+
+        auto buffer = m_vkBufferPool->take(buffSize);
+        if (!buffer)
+            return false;
+
+        auto data = buffer->map<uint8_t>();
+
+        img = imgBegin;
+        while (img) try
+        {
+            if (img->w <= 0 || img->h <= 0)
+            {
+                img = img->next;
+                continue;
+            }
+
+            const vk::DeviceSize viewSize = getImgBuffSize(img);
+            const uint32_t imgSize = img->stride * (img->h - 1) + img->w;
+            memcpy(data + buffOffset, img->bitmap, imgSize);
+
+            auto &osdImg = osd->add();
+            osdImg.rect = QRectF(img->dst_x, img->dst_y, img->w, img->h);
+            osdImg.size = QSize(img->w, img->h);
+            osdImg.dataBufferView = BufferView::create(buffer, vk::Format::eR8Unorm, buffOffset, imgSize);
+            osdImg.linesize = img->stride;
+            osdImg.color.setX(((img->color >> 24) & 0xff) / 255.0f);
+            osdImg.color.setY(((img->color >> 16) & 0xff) / 255.0f);
+            osdImg.color.setZ(((img->color >>  8) & 0xff) / 255.0f);
+            osdImg.color.setW(((~img->color)      & 0xff) / 255.0f);
+
+            buffOffset += viewSize;
+
+            img = img->next;
+        }
+        catch (const vk::SystemError &e)
+        {
+            Q_UNUSED(e)
+            osd->clear();
+            return false;
+        }
+
+        osd->setReturnVkBufferFn(m_vkBufferPool, std::move(buffer));
+
+        return true;
+    }
+#endif
+
+    while (img)
+    {
+        auto &osdImg = osd->add();
+        osdImg.rect = QRect(img->dst_x, img->dst_y, img->w, img->h);
+        osdImg.size = QSize(img->w, img->h);
+        osdImg.rgba = QByteArray(img->w * img->h * sizeof(uint32_t), Qt::Uninitialized);
+
+        const quint8 r = img->color >> 24;
+        const quint8 g = img->color >> 16;
+        const quint8 b = img->color >>  8;
+        const quint8 a = ~img->color & 0xFF;
+
+        auto data = reinterpret_cast<uint32_t *>(osdImg.rgba.data());
+        for (int y = 0; y < img->h; y++)
+        {
+            const int offsetI = y * img->stride;
+            const int offsetB = y * img->w;
+            for (int x = 0; x < img->w; x++)
+                data[offsetB + x] = (a * img->bitmap[offsetI + x] / 0xFF) << 24 | b << 16 | g << 8 | r;
+        }
+
+        img = img->next;
+    }
+
+    return true;
+}
+
+void LibASS::setWindowSize(const QSize &winSize)
+{
+    const qreal dpr = QMPlay2Core.getVideoDevicePixelRatio();
+    winW = winSize.width() * dpr;
+    winH = winSize.height() * dpr;
+    calcSize();
+}
+void LibASS::setARatio(double _aspect_ratio)
+{
+    aspect_ratio = _aspect_ratio;
+    calcSize();
+}
+void LibASS::setZoom(double _zoom)
+{
+    zoom = _zoom;
+    calcSize();
+}
+void LibASS::setFontScale(double fs)
+{
+    fontScale = fs;
+}
+
+void LibASS::addFont(const QByteArray &name, const QByteArray &data)
+{
+    ass_add_font(m_subsAss, (char *)name.constData(), (char *)data.constData(), data.size());
+}
+
+void LibASS::initOSD()
+{
+    if (osd_track && osd_style && osd_event && osd_renderer)
+        return;
+
+    osd_track = ass_new_track(m_osdAss);
+
+    int styleID = ass_alloc_style(osd_track);
+    osd_style = &osd_track->styles[styleID];
+    setOSDStyle();
+
+    int eventID = ass_alloc_event(osd_track);
+    osd_event = &osd_track->events[eventID];
+    osd_event->Start = 0;
+    osd_event->Duration = 1;
+    osd_event->Style = styleID;
+    osd_event->ReadOrder = eventID;
+
+    osd_renderer = ass_renderer_init(m_osdAss);
+    ass_set_fonts(osd_renderer, nullptr, nullptr, 1, nullptr, 1);
+}
+void LibASS::setOSDStyle()
+{
+    if (!osd_style)
+        return;
+    osd_style->ScaleX = osd_style->ScaleY = 1;
+    readStyle("OSD", osd_style);
+}
+bool LibASS::getOSD(shared_ptr<QMPlay2OSD> &osd, const QByteArray &txt, double duration)
+{
+    if (!osd_track || !osd_style || !osd_event || !osd_renderer || !W || !H)
+        return false;
+
+    const qreal dpr = QMPlay2Core.getVideoDevicePixelRatio();
+    osd_track->PlayResX = W / dpr;
+    osd_track->PlayResY = H / dpr;
+    ass_set_frame_size(osd_renderer, W, H);
+
+    osd_event->Text = (char *)txt.constData();
+    int ch;
+    ASS_Image *img = ass_render_frame(osd_renderer, osd_track, 0, &ch);
+    osd_event->Text = nullptr;
+    if (!img)
+        return false;
+    auto locker = QMPlay2OSD::ensure(osd);
+    if (ch)
+        osd->clear();
+    osd->setText(txt);
+    osd->setDuration(duration);
+    if (ch || !locker.owns_lock())
+    {
+        if (addImgs(img, osd.get()))
+            osd->genId();
+    }
+    osd->start();
+    return true;
+}
+void LibASS::closeOSD()
+{
+    if (osd_renderer)
+        ass_renderer_done(osd_renderer);
+    if (osd_track)
+        ass_free_track(osd_track);
+    osd_track = nullptr;
+    osd_style = nullptr;
+    osd_event = nullptr;
+    osd_renderer = nullptr;
+}
+
+void LibASS::initASS(const QByteArray &ass_data)
+{
+    if (ass_sub_track && ass_sub_renderer)
+        return;
+
+    ass_sub_track = ass_new_track(m_subsAss);
+    if (!ass_data.isEmpty())
+    {
+        ass_process_codec_private(ass_sub_track, (char *)ass_data.constData(), ass_data.size());
+        for (int i = 0; i < ass_sub_track->n_events; ++i)
+            ass_sub_track->events[i].ReadOrder = i;
+        hasASSData = true;
+        setASSStyle();
+    }
+    else
+    {
+        ass_alloc_style(ass_sub_track);
+        ass_sub_track->styles[0].ScaleX = ass_sub_track->styles[0].ScaleY = 1;
+        hasASSData = false;
+        setASSStyle();
+    }
+
+    ass_sub_renderer = ass_renderer_init(m_subsAss);
+    ass_set_fonts(ass_sub_renderer, nullptr, nullptr, true, nullptr, true);
+}
+bool LibASS::isASS() const
+{
+    return hasASSData && ass_sub_track && ass_sub_renderer;
+}
+void LibASS::setASSStyle()
+{
+    if (!ass_sub_track)
+        return;
+
+    if (!hasASSData)
+    {
+        readStyle("Subtitles", &ass_sub_track->styles[0]);
+        return;
+    }
+
+    bool colorsAndBorders, marginsAndAlignment, fontsAndSpacing;
+    if (settings.getBool("ApplyToASS/ApplyToASS"))
+    {
+        colorsAndBorders = settings.getBool("ApplyToASS/ColorsAndBorders");
+        marginsAndAlignment = settings.getBool("ApplyToASS/MarginsAndAlignment");
+        fontsAndSpacing = settings.getBool("ApplyToASS/FontsAndSpacing");
+    }
+    else
+        colorsAndBorders = marginsAndAlignment = fontsAndSpacing = false;
+
+    if (!ass_sub_styles_copy.size()) //tworzenie kopii za pierwszym razem
+    {
+        if (!colorsAndBorders && !marginsAndAlignment && !fontsAndSpacing) //nie ma nic do zastosowania
+            return;
+        for (int i = 0; i < ass_sub_track->n_styles; i++)
+        {
+            ASS_Style *style = new ASS_Style;
+            memcpy(style, &ass_sub_track->styles[i], sizeof(ASS_Style));
+            style->Name = nullptr;
+            if (ass_sub_track->styles[i].FontName)
+                style->FontName = strdup(ass_sub_track->styles[i].FontName);
+            else
+                style->FontName = nullptr;
+            ass_sub_styles_copy += style;
+        }
+    }
+    if (ass_sub_track->n_styles != ass_sub_styles_copy.size())
+        return;
+
+    const auto fontRatio = sqrt(ass_sub_track->PlayResX * ass_sub_track->PlayResX + ass_sub_track->PlayResY * ass_sub_track->PlayResY) / sqrt(384 * 384 + 288 * 288);
+    for (int i = 0; i < ass_sub_track->n_styles; i++)
+    {
+        ASS_Style &style = ass_sub_track->styles[i];
+        ass_style *style_copy = ass_sub_styles_copy.at(i);
+        if (style_copy->Alignment != 2 || style_copy->Angle != 0)
+            continue; // Don't apply to styles with non standard alignment / angle (e.g. karaoke, rotated texts, etc.)
+        if (colorsAndBorders)
+        {
+            const bool bg = settings.getBool("Subtitles/Background");
+            style.PrimaryColour = assColorFromQColor(settings.getColor("Subtitles/TextColor"));
+            style.SecondaryColour = assColorFromQColor(settings.getColor("Subtitles/TextColor"), true);
+            style.OutlineColour = assColorFromQColor(settings.getColor("Subtitles/OutlineColor"));
+            style.BackColour = assColorFromQColor(settings.getColor(bg ? "Subtitles/BackgroundColor" : "Subtitles/ShadowColor"));
+            style.BorderStyle = bg ? 4 : 1;
+            style.Outline = settings.getDouble("Subtitles/Outline");
+            style.Shadow = settings.getDouble("Subtitles/Shadow");
+        }
+        else
+        {
+            style.PrimaryColour = style_copy->PrimaryColour;
+            style.SecondaryColour = style_copy->SecondaryColour;
+            style.OutlineColour = style_copy->OutlineColour;
+            style.BackColour = style_copy->BackColour;
+            style.BorderStyle = style_copy->BorderStyle;
+            style.Outline = style_copy->Outline;
+            style.Shadow = style_copy->Shadow;
+        }
+        if (marginsAndAlignment)
+        {
+            style.MarginL = settings.getInt("Subtitles/LeftMargin");
+            style.MarginR = settings.getInt("Subtitles/RightMargin");
+            style.MarginV = settings.getInt("Subtitles/VMargin");
+            style.Alignment = toASSAlignment(settings.getInt("Subtitles/Alignment"));
+            style.Angle = 0;
+        }
+        else
+        {
+            style.MarginL = style_copy->MarginL;
+            style.MarginR = style_copy->MarginR;
+            style.MarginV = style_copy->MarginV;
+            style.Alignment = style_copy->Alignment;
+            style.Angle = style_copy->Angle;
+        }
+        if (style.FontName)
+            free(style.FontName);
+        if (fontsAndSpacing)
+        {
+            style.FontName = strdup(settings.getString("Subtitles/FontName").toUtf8().constData());
+            style.FontSize = settings.getInt("Subtitles/FontSize") * fontRatio;
+            style.Spacing = settings.getDouble("Subtitles/Spacing");
+            style.ScaleX = style.ScaleY = 1;
+            style.Bold = settings.getBool("Subtitles/Bold");
+            style.Italic = style.Underline = style.StrikeOut = 0;
+        }
+        else
+        {
+            if (style_copy->FontName)
+                style.FontName = strdup(style_copy->FontName);
+            else
+                style.FontName = nullptr;
+            style.FontSize = style_copy->FontSize;
+            style.Spacing = style_copy->Spacing;
+            style.ScaleX = style_copy->ScaleX;
+            style.ScaleY = style_copy->ScaleY;
+            style.Bold = style_copy->Bold;
+            style.Italic = style_copy->Italic;
+            style.Underline = style_copy->Underline;
+            style.StrikeOut = style_copy->StrikeOut;
+        }
+    }
+}
+void LibASS::addASSEvent(const QByteArray &event)
+{
+    if (!ass_sub_track || !ass_sub_renderer || event.isEmpty())
+        return;
+    ass_process_data(ass_sub_track, (char *)event.constData(), event.size());
+}
+void LibASS::addASSEvents(const QList<QByteArray> &events, double start, double duration)
+{
+    if (!ass_sub_track || !ass_sub_renderer || events.isEmpty())
+        return;
+
+    for (auto &&event : events)
+    {
+        ass_process_chunk(ass_sub_track, const_cast<char *>(event.constData()), event.size(), start * 1000, duration * 1000);
+    }
+}
+void LibASS::addASSEvent(const QByteArray &text, double Start, double Duration)
+{
+    if (!ass_sub_track || !ass_sub_renderer || text.isEmpty() || Start < 0 || Duration < 0)
+        return;
+    int eventID = ass_alloc_event(ass_sub_track);
+    ASS_Event *event = &ass_sub_track->events[eventID];
+    event->Text = strdup(text.constData());
+    event->Start = Start * 1000;
+    event->Duration = Duration * 1000;
+    event->Style = 0;
+    event->ReadOrder = eventID;
+}
+void LibASS::flushASSEvents()
+{
+    if (!ass_sub_track || !ass_sub_renderer)
+        return;
+    ass_flush_events(ass_sub_track);
+}
+bool LibASS::getASS(shared_ptr<QMPlay2OSD> &osd, double pos)
+{
+    if (!ass_sub_track || !ass_sub_renderer || !W || !H)
+        return false;
+
+    if (qIsNaN(pos))
+        pos = m_lastPos;
+    if (qIsNaN(pos))
+        return false;
+
+    double _fontScale = fontScale;
+
+    if (_fontScale != 1.0)
+    {
+        for (int i = 0; i < ass_sub_track->n_styles; i++)
+        {
+            ASS_Style &style = ass_sub_track->styles[i];
+            style.ScaleX  *= _fontScale;
+            style.ScaleY  *= _fontScale;
+            style.Shadow  *= _fontScale;
+            style.Outline *= _fontScale;
+        }
+    }
+
+    ass_set_frame_size(ass_sub_renderer, W, H);
+
+    const int marginLR = qMax(0, W / 2 - winW / 2);
+    const int marginTB = qMax(0, H / 2 - winH / 2);
+    ass_set_margins(ass_sub_renderer, marginTB, marginTB, marginLR, marginLR);
+
+    int ch;
+    ASS_Image *img = ass_render_frame(ass_sub_renderer, ass_sub_track, pos * 1000, &ch);
+
+    m_lastPos = pos;
+
+    if (ch)
+        m_assIDs.clear();
+
+    if (_fontScale != 1.0)
+    {
+        for (int i = 0; i < ass_sub_track->n_styles; i++)
+        {
+            ASS_Style &style = ass_sub_track->styles[i];
+            style.ScaleX  /= _fontScale;
+            style.ScaleY  /= _fontScale;
+            style.Shadow  /= _fontScale;
+            style.Outline /= _fontScale;
+        }
+    }
+
+    if (!img)
+        return false;
+
+    auto locker = QMPlay2OSD::ensure(osd);
+    if (osd->id() != 0 && m_assIDs.count(osd->id()) == 0)
+    {
+        osd->clear();
+    }
+    osd->setPTS(pos);
+    if (osd->id() == 0)
+    {
+        if (addImgs(img, osd.get()))
+        {
+            osd->genId();
+            Q_ASSERT(osd->id() != 0);
+            m_assIDs.insert(osd->id());
+        }
+    }
+    return true;
+}
+void LibASS::closeASS()
+{
+    while (ass_sub_styles_copy.size())
+    {
+        ASS_Style *style = ass_sub_styles_copy.takeFirst();
+        if (style->FontName)
+            free(style->FontName);
+        delete style;
+    }
+    if (ass_sub_renderer)
+        ass_renderer_done(ass_sub_renderer);
+    if (ass_sub_track)
+        ass_free_track(ass_sub_track);
+    ass_sub_track = nullptr;
+    ass_sub_renderer = nullptr;
+    ass_clear_fonts(m_subsAss);
+    m_lastPos = qQNaN();
+    m_assIDs.clear();
+}
+
+void LibASS::readStyle(const QString &prefix, ASS_Style *style)
+{
+    const bool bg = settings.getBool(prefix + "/Background");
+    if (style->FontName)
+        free(style->FontName);
+    style->FontName = strdup(settings.getString(prefix + "/FontName").toUtf8().constData());
+    style->FontSize = settings.getInt(prefix + "/FontSize");
+    style->PrimaryColour = style->SecondaryColour = assColorFromQColor(settings.getColor(prefix + "/TextColor"));
+    style->OutlineColour = assColorFromQColor(settings.getColor(prefix + "/OutlineColor"));
+    style->BackColour = assColorFromQColor(settings.getColor(prefix + (bg ? "/BackgroundColor" : "/ShadowColor")));
+    style->Bold = settings.getBool(prefix + "/Bold");
+    style->Spacing = settings.getDouble(prefix + "/Spacing");
+    style->BorderStyle = bg ? 4 : 1;
+    style->Outline = settings.getDouble(prefix + "/Outline");
+    style->Shadow = settings.getDouble(prefix + "/Shadow");
+    style->Alignment = toASSAlignment(settings.getInt(prefix + "/Alignment"));
+    style->MarginL = settings.getInt(prefix + "/LeftMargin");
+    style->MarginR = settings.getInt(prefix + "/RightMargin");
+    style->MarginV = settings.getInt(prefix + "/VMargin");
+}
+inline void LibASS::calcSize()
+{
+    Functions::getImageSize(aspect_ratio, zoom, winW, winH, W, H);
+}
+
+#else // QMPLAY2_LIBASS
+
+bool LibASS::isDummy()
+{
+    return true;
+}
+
+LibASS::LibASS(Settings &settings) :
+    settings(settings)
+{}
+LibASS::~LibASS()
+{}
+
+bool LibASS::addImgs(ass_image *, QMPlay2OSD *)
+{
+    return false;
+}
+
+void LibASS::setWindowSize(const QSize &)
+{}
+void LibASS::setARatio(double)
+{}
+void LibASS::setZoom(double)
+{}
+void LibASS::setFontScale(double)
+{}
+
+void LibASS::addFont(const QByteArray &, const QByteArray &)
+{}
+
+void LibASS::initOSD()
+{}
+void LibASS::setOSDStyle()
+{}
+bool LibASS::getOSD(std::shared_ptr<QMPlay2OSD> &, const QByteArray &, double)
+{
+    return false;
+}
+void LibASS::closeOSD()
+{}
+
+void LibASS::initASS(const QByteArray &)
+{}
+bool LibASS::isASS() const
+{
+    return false;
+}
+void LibASS::setASSStyle()
+{}
+void LibASS::addASSEvent(const QByteArray &)
+{}
+void LibASS::addASSEvents(const QList<QByteArray> &, double, double)
+{}
+void LibASS::addASSEvent(const QByteArray &, double, double)
+{}
+void LibASS::flushASSEvents()
+{}
+bool LibASS::getASS(std::shared_ptr<QMPlay2OSD> &, double)
+{
+    return false;
+}
+void LibASS::closeASS()
+{}
+
+#endif // QMPLAY2_LIBASS
